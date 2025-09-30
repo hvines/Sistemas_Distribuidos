@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - default
+    # Opcional: limitar recursos si es necesario
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  ollama-setup:
+    image: curlimages/curl:latest
+    depends_on:
+      - ollama
+    volumes:
+      - ./init-ollama.sh:/init-ollama.sh
+    command: ["sh", "/init-ollama.sh"]
+    networks:
+      - default
+
+  redis-cache:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction
+    networks:
+      - default
+
+  postgres-db:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: yahoo_analysis
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./storage/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - default
+
+  traffic-generator:
+    build: ./traffic_generator
+    depends_on:
+      - redis-cache
+      - postgres-db
+    volumes:
+      - ./datasets:/app/datasets
+    networks:
+      - default
+
+  cache-system:
+    build: ./cache_system
+    depends_on:
+      - redis-cache
+      - postgres-db
+    networks:
+      - default
+
+  llm-processor:
+    build: ./llm_processor
+    depends_on:
+      - redis-cache
+      - ollama-setup  # Ahora depende del setup que asegura que el modelo está descargado
+    networks:
+      - default
+
+  score-calculator:
+    build: ./score_calculator
+    depends_on:
+      - redis-cache
+      - postgres-db
+    networks:
+      - default
+
+  storage:
+    build: ./storage
+    depends_on:
+      - postgres-db
+    networks:
+      - default
+
+volumes:
+  postgres_data:
+  ollama_data:
