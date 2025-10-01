@@ -1,7 +1,6 @@
 import psycopg2
 
 def get_db_connection():
-    """Obtener conexión a la base de datos"""
     return psycopg2.connect(
         host='postgres-db',
         database='yahoo_analysis',
@@ -10,7 +9,6 @@ def get_db_connection():
     )
 
 def get_stats():
-    """Obtener estadísticas de la base de datos"""
     conn = get_db_connection()
     cur = conn.cursor()
     
