@@ -13,6 +13,131 @@ Sistema distribuido que implementa un flujo completo de procesamiento de pregunt
 
 ---
 
+##  Cómo Ejecutar
+
+### Paso 1: Inicializar Ollama (si no existe)
+
+```bash
+# En Mac/Linux:
+./init-ollama.sh
+
+# En Windows (PowerShell):
+.\init-ollama.ps1
+```
+
+**Nota:** Ollama se descargará automáticamente al iniciar, pero puede tardar 2-3 minutos.
+
+### Paso 2: Levantar todos los servicios
+
+```bash
+docker-compose up -d
+```
+
+Esto iniciará:
+-  Zookeeper
+-  Kafka (con 4 topics: consultas-entrantes, consultas-procesadas, respuestas-llm, respuestas-validadas)
+-  PostgreSQL (con tabla responses usando question_hash para caché)
+-  Ollama + TinyLlama (1.1B parámetros, 637MB)
+-  Flink JobManager y TaskManager
+-  Traffic Generator
+-  Storage System (con verificación de caché)
+-  LLM Processor
+-  Flink Processor (validador de calidad con threshold 0.3)
+-  Score Calculator (calcula similitud entre best_answer y llm_answer)
+
+### Paso 3: Verificar que los servicios están corriendo
+
+```bash
+# Ver todos los servicios
+docker-compose ps
+
+# Ver logs de un servicio específico
+docker logs -f traffic-generator
+docker logs -f storage-system
+docker logs -f llm-processor
+docker logs -f score-calculator
+```
+
+
+### Paso 4: Monitorear el sistema
+
+**Usar el script de monitoreo automático**
+
+```bash
+# Dar permisos de ejecución
+chmod +x monitor.sh
+
+# Ejecutar el script de monitoreo
+./monitor.sh
+```
+
+El script `monitor.sh` te mostrará:
+-  Estado de todos los servicios
+-  Estadísticas de cache (hits/misses)
+-  Últimos cache hits detectados
+-  Total de preguntas en base de datos
+-  Topics de Kafka disponibles
+-  Última actividad del sistema
+
+
+### Paso 5: Consultar la base de datos
+
+```bash
+# Conectar a PostgreSQL
+docker exec -it postgres-db psql -U user -d yahoo_analysis
+
+# Ver todas las respuestas
+SELECT id, question_title, cosine_score, question_hash, created_at 
+FROM responses 
+ORDER BY created_at DESC 
+LIMIT 10;
+
+# Ver estadísticas de caché
+SELECT 
+    COUNT(*) as total_preguntas,
+    COUNT(DISTINCT question_hash) as preguntas_unicas,
+    AVG(cosine_score) as score_promedio
+FROM responses;
+```
+
+---
+
+## Verificar Cache Hit Rate
+
+El **Storage System** muestra estadísticas en tiempo real:
+
+```bash
+docker logs -f storage-system
+```
+
+---
+
+
+##  Resumen de Comandos Útiles de Monitoreo
+
+```bash
+
+# Monitoreo rápido del sistema
+./monitor.sh
+
+# Ver estado de servicios
+docker-compose ps
+
+# Ver logs de un servicio específico
+docker logs -f <service-name>
+
+# Verificar topics de Kafka
+docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
+
+# Consultar base de datos
+docker exec -it postgres-db psql -U user -d yahoo_analysis
+```
+
+---
+
+
+
+
 ##  Arquitectura y Pipeline Actual
 
 ```
@@ -104,211 +229,6 @@ Sistema distribuido que implementa un flujo completo de procesamiento de pregunt
 │     - cosine_score: Similitud entre ambas respuestas            │
 │     - Índice en question_hash para búsquedas rápidas            │
 └─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Flujo de Datos
-
-### Caso 1: Pregunta NUEVA (Cache Miss)
-```
-Traffic Generator → consultas-entrantes → Storage System (MISS) 
-  → consultas-procesadas → LLM Processor → respuestas-llm 
-  → Flink Validator (score >= 0.3) → respuestas-validadas
-  → Score Calculator → PostgreSQL 
-```
-
-### Caso 2: Pregunta EXISTENTE (Cache Hit)
-```
-Traffic Generator → consultas-entrantes → Storage System (HIT)
-  → Obtiene respuesta + score de PostgreSQL
-  → Envía a respuestas-llm (con cache_hit=true)
-  → Flink Validator (detecta cache_hit) → respuestas-validadas
-  → Score Calculator ignora (ya tiene score) 
-```
-
----
-
-##  Componentes del Sistema
-
-| Componente | Función | Puerto |
-|------------|---------|--------|
-| **Zookeeper** | Coordinador de Kafka | 2181 |
-| **Kafka** | Message broker (4 topics) | 9092 (interno), 9093 (externo) |
-| **PostgreSQL** | Base de datos persistente con caché | 5432 |
-| **Ollama** | Servidor LLM (TinyLlama 1.1B) | 11434 |
-| **Traffic Generator** | Lee train.csv y genera tráfico | - |
-| **Storage System** | Verifica caché en PostgreSQL | - |
-| **LLM Processor** | Genera respuestas con TinyLlama | - |
-| **Flink JobManager** | Coordinador de Apache Flink | 8081 |
-| **Flink TaskManager** | Worker de Apache Flink | - |
-| **Flink Processor** | Validador de calidad con threshold | - |
-| **Score Calculator** | Calcula similitud coseno | - |
-
----
-
-##  Cómo Ejecutar
-
-### Paso 1: Inicializar Ollama (si no existe)
-
-```bash
-# En Mac/Linux:
-./init-ollama.sh
-
-# En Windows (PowerShell):
-.\init-ollama.ps1
-```
-
-**Nota:** Ollama se descargará automáticamente al iniciar, pero puede tardar 2-3 minutos.
-
-### Paso 2: Levantar todos los servicios
-
-```bash
-docker-compose up -d
-```
-
-Esto iniciará:
--  Zookeeper
--  Kafka (con 4 topics: consultas-entrantes, consultas-procesadas, respuestas-llm, respuestas-validadas)
--  PostgreSQL (con tabla responses usando question_hash para caché)
--  Ollama + TinyLlama (1.1B parámetros, 637MB)
--  Flink JobManager y TaskManager
--  Traffic Generator
--  Storage System (con verificación de caché)
--  LLM Processor
--  Flink Processor (validador de calidad con threshold 0.3)
--  Score Calculator (calcula similitud entre best_answer y llm_answer)
-
-### Paso 3: Verificar que los servicios están corriendo
-
-```bash
-# Ver todos los servicios
-docker-compose ps
-
-# Ver logs de un servicio específico
-docker logs -f traffic-generator
-docker logs -f storage-system
-docker logs -f llm-processor
-docker logs -f score-calculator
-```
-
-**⚠️ Importante:** Espera 2-3 minutos después de `docker-compose up -d` para que:
-1. Kafka cree los topics automáticamente
-2. Ollama descargue el modelo TinyLlama (637MB)
-3. PostgreSQL inicialice la base de datos
-
-### Paso 4: Monitorear el sistema
-
-**Opción 1: Usar el script de monitoreo automático** (Recomendado)
-
-```bash
-# Dar permisos de ejecución
-chmod +x monitor.sh
-
-# Ejecutar el script de monitoreo
-./monitor.sh
-```
-
-El script `monitor.sh` te mostrará:
--  Estado de todos los servicios
--  Estadísticas de cache (hits/misses)
--  Últimos cache hits detectados
--  Total de preguntas en base de datos
--  Topics de Kafka disponibles
--  Última actividad del sistema
-
-
-### Paso 5: Consultar la base de datos
-
-```bash
-# Conectar a PostgreSQL
-docker exec -it postgres-db psql -U user -d yahoo_analysis
-
-# Ver todas las respuestas
-SELECT id, question_title, cosine_score, question_hash, created_at 
-FROM responses 
-ORDER BY created_at DESC 
-LIMIT 10;
-
-# Ver estadísticas de caché
-SELECT 
-    COUNT(*) as total_preguntas,
-    COUNT(DISTINCT question_hash) as preguntas_unicas,
-    AVG(cosine_score) as score_promedio
-FROM responses;
-```
-
----
-
-## Verificar Cache Hit Rate
-
-El **Storage System** muestra estadísticas en tiempo real:
-
-```bash
-docker logs -f storage-system
-```
-
----
-
-##  Topics de Kafka
-
-| Topic | Descripción | Partitions | Productores | Consumidores |
-|-------|-------------|------------|-------------|--------------|
-| `consultas-entrantes` | Preguntas del generador | 3 | traffic-generator | storage-system |
-| `consultas-procesadas` | Preguntas sin caché + rechazadas por Flink | 3 | storage-system, flink-processor | llm-processor |
-| `respuestas-llm` | Respuestas del LLM + cacheadas | 3 | llm-processor, storage-system | flink-processor |
-| `respuestas-validadas` | Respuestas aprobadas por Flink | 3 | flink-processor | score-calculator |
-
----
-
-##  Ventajas de esta Arquitectura
-
-1. **Caché Inteligente**: Verifica en PostgreSQL antes de procesar
-2. **Sin Reprocesamiento**: Preguntas repetidas no pasan por el LLM
-3. **Escalable**: Kafka permite múltiples consumidores
-4. **Persistente**: Mensajes no se pierden (Kafka persiste 7 días por defecto)
-5. **Observable**: Logs en cada capa del flujo
-6. **Flexible**: Fácil agregar nuevos procesadores o transformaciones
-7. **Eficiente**: Solo consultas nuevas usan recursos del LLM
-
----
-
-
-##  Comandos Útiles de Monitoreo
-
-```bash
-# Ver todos los logs en tiempo real
-docker-compose logs -f
-
-# Detener todo
-docker-compose down
-
-# Detener y limpiar volúmenes (CUIDADO: borra la DB)
-docker-compose down -v
-
-# Reconstruir servicios
-docker-compose up -d --build
-
-# Ver uso de recursos
-docker stats
-
-# Entrar a un contenedor
-docker exec -it <container-name> /bin/sh
-
-# Monitoreo rápido del sistema
-./monitor.sh
-
-# Ver estado de servicios
-docker-compose ps
-
-# Ver logs de un servicio específico
-docker logs -f <service-name>
-
-# Verificar topics de Kafka
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
-
-# Consultar base de datos
-docker exec -it postgres-db psql -U user -d yahoo_analysis
 ```
 
 ---
