@@ -1,5 +1,7 @@
 version: '3.8'
 
+name: sistemas_distribuidos-t1
+
 services:
   ollama:
     image: ollama/ollama:latest

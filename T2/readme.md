@@ -52,7 +52,7 @@ Sistema distribuido que implementa un flujo completo de procesamiento de pregunt
 │  5. LLM Processor                                               │
 │     - Consume mensajes de Kafka                                 │
 │     - Genera respuesta usando TinyLlama (Ollama)                │
-│     - Incluye best_answer del dataset + llm_answer generada    │
+│     - Incluye best_answer del dataset + llm_answer generada     │
 │     - Envía resultado a siguiente topic                         │
 └──────────────┬──────────────────────────────────────────────────┘
                │ produce → respuestas-llm
@@ -65,24 +65,24 @@ Sistema distribuido que implementa un flujo completo de procesamiento de pregunt
                │ consume (group: flink-validator-group)
                ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  7. Apache Flink - Validador de Calidad ⭐ NUEVO               │
+│  7. Apache Flink - Validador de Calidad                         │
 │     - Consume respuestas del LLM                                │
-│     - Valida score contra THRESHOLD (default: 0.3 = 30%)       │
-│     - DECISIÓN 1: Score >= 0.3 → Aprueba                       │
+│     - Valida score contra THRESHOLD (default: 0.3 = 30%)        │
+│     - DECISIÓN 1: Score >= 0.3 → Aprueba                        │
 │       → Envía a respuestas-validadas                            │
-│     - DECISIÓN 2: Score < 0.3 y retry_count < 3 → Rechaza      │
+│     - DECISIÓN 2: Score < 0.3 y retry_count < 3 → Rechaza       │
 │       → Envía a consultas-procesadas (reprocesar)               │
-│     - DECISIÓN 3: retry_count >= 3 → Aprueba                   │
+│     - DECISIÓN 3: retry_count >= 3 → Aprueba                    │
 │       → Evita loops infinitos                                   │
-│     - Cache hits siempre aprobados (ya validados antes)        │
+│     - Cache hits siempre aprobados (ya validados antes)         │
 └──────────────┬──────────────────────────────────────────────────┘
                │ produce → respuestas-validadas (aprobadas)
                │           consultas-procesadas (rechazadas)
                ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  8. Kafka Topic: respuestas-validadas ⭐ NUEVO                  │
+│  8. Kafka Topic: respuestas-validadas                           │
 │     - 3 partitions, replication factor 1                        │
-│     - Solo respuestas que pasaron validación de Flink          │
+│     - Solo respuestas que pasaron validación de Flink           │
 └──────────────┬──────────────────────────────────────────────────┘
                │ consume (group: score-calculator-group)
                ↓
@@ -91,18 +91,18 @@ Sistema distribuido que implementa un flujo completo de procesamiento de pregunt
 │     - Calcula cosine_similarity entre:                          │
 │       * best_answer (respuesta original del dataset)            │
 │       * llm_answer (respuesta generada por TinyLlama)           │
-│     - Score: 0.0 (0%) a 1.0 (100%) de similitud                │
+│     - Score: 0.0 (0%) a 1.0 (100%) de similitud                 │
 │     - Guarda en PostgreSQL: pregunta + respuestas + score       │
 └──────────────┬──────────────────────────────────────────────────┘
                ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │  10. PostgreSQL                                                 │
 │     - Tabla: responses                                          │
-│     - question_hash (UNIQUE) ← Clave para detección de caché   │
+│     - question_hash (UNIQUE) ← Clave para detección de caché    │
 │     - best_answer: Respuesta original del dataset               │
-│     - llm_answer: Respuesta generada por TinyLlama             │
-│     - cosine_score: Similitud entre ambas respuestas           │
-│     - Índice en question_hash para búsquedas rápidas           │
+│     - llm_answer: Respuesta generada por TinyLlama              │
+│     - cosine_score: Similitud entre ambas respuestas            │
+│     - Índice en question_hash para búsquedas rápidas            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -159,7 +159,7 @@ Traffic Generator → consultas-entrantes → Storage System (HIT)
 .\init-ollama.ps1
 ```
 
-**Nota:** Si no tienes los scripts de inicialización, Ollama se descargará automáticamente al iniciar, pero puede tardar 2-3 minutos.
+**Nota:** Ollama se descargará automáticamente al iniciar, pero puede tardar 2-3 minutos.
 
 ### Paso 2: Levantar todos los servicios
 
@@ -184,12 +184,6 @@ Esto iniciará:
 ```bash
 # Ver todos los servicios
 docker-compose ps
-
-# Verificar que Ollama está healthy (puede tardar 1-2 minutos)
-docker ps | grep ollama
-
-# Si Ollama está "unhealthy", ver sección de Troubleshooting
-docker logs ollama
 
 # Ver logs de un servicio específico
 docker logs -f traffic-generator
@@ -223,27 +217,6 @@ El script `monitor.sh` te mostrará:
 -  Topics de Kafka disponibles
 -  Última actividad del sistema
 
-**Opción 2: Monitoreo manual por componente**
-
-```bash
-# Ver mensajes en consultas-entrantes
-docker exec -it kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic consultas-entrantes \
-  --from-beginning
-
-# Ver mensajes en consultas-procesadas (solo cache MISS)
-docker exec -it kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic consultas-procesadas \
-  --from-beginning
-
-# Ver respuestas del LLM
-docker exec -it kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic respuestas-llm \
-  --from-beginning
-```
 
 ### Paso 5: Consultar la base de datos
 
@@ -300,49 +273,6 @@ docker logs -f storage-system
 
 ---
 
-##  Estructura del Proyecto
-
-```
-Sistemas_Distribuidos-main/
-├── docker-compose.yml                  ← Orquestación completa
-├── monitor.sh                          ← Script de monitoreo del sistema
-├── readme.md                           ← Este archivo
-├── datasets/
-│   └── train.csv                       ← Dataset de Yahoo Answers
-├── traffic_generator/
-│   ├── generator.py                    ← Generador de tráfico desde CSV
-│   ├── requirements.txt
-│   └── Dockerfile
-├── storage_system/
-│   ├── storage.py                      ← Verificación de caché con PostgreSQL
-│   ├── requirements.txt
-│   └── Dockerfile
-├── cache_system/
-│   ├── cache.py                        ← Sistema de caché (alternativa a storage_system)
-│   ├── requirements.txt
-│   └── Dockerfile
-├── flink_processor/
-│   ├── processor_flink.py              ← Validador Flink (IMPLEMENTADO ✅)
-│   ├── requirements.txt
-│   └── Dockerfile
-├── llm_processor/
-│   ├── processor.py                    ← Procesamiento con TinyLlama via Ollama
-│   ├── requirements.txt
-│   └── Dockerfile
-├── score_calculator/
-│   ├── score.py                        ← Cálculo de similitud coseno
-│   ├── requirements.txt
-│   └── Dockerfile
-├── storage/
-│   ├── database.py
-│   ├── init.sql                        ← Schema PostgreSQL con question_hash
-│   ├── requirements.txt
-│   └── Dockerfile
-└── storage_system/
-    └── ...                             ← Sistema de almacenamiento actual
-```
-
----
 
 ##  Comandos Útiles de Monitoreo
 
