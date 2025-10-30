@@ -1,0 +1,341 @@
+services:
+  
+  
+  # Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - distributed-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka - Broker de mensajería
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - distributed-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - distributed-network
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Esperando a que Kafka esté listo...'
+      sleep 10
+      
+      echo 'Creando topics de Kafka...'
+      
+      # Topic para consultas del generador de tráfico
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic consultas-entrantes --partitions 3 --replication-factor 1
+      
+      # Topic para consultas procesadas por Flink
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic consultas-procesadas --partitions 3 --replication-factor 1
+      
+      # Topic para respuestas del LLM
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic respuestas-llm --partitions 3 --replication-factor 1
+      
+      # Topic para respuestas con score (Score Calculator -> Flink)
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic respuestas-con-score --partitions 3 --replication-factor 1
+      
+      # Topic para respuestas validadas por Flink (deprecated - se guarda en DB)
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic respuestas-validadas --partitions 3 --replication-factor 1
+      
+      echo 'Topics creados:'
+      kafka-topics --bootstrap-server kafka:9092 --list
+      
+      echo ' Inicialización de Kafka completada'
+      "
+
+
+  # Redis
+  redis-cache:
+    image: redis:7-alpine
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    networks:
+      - distributed-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # PostgreSQL
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: yahoo_analysis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./storage/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - distributed-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d yahoo_analysis"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+
+
+  # Ollama
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - distributed-network
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 60s        
+      timeout: 30s
+      retries: 10         
+      start_period: 180s  
+
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - distributed-network
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo ' Esperando a que Ollama esté listo...'
+      sleep 5
+      
+      echo ' Verificando modelo TinyLlama...'
+      
+      if ollama list | grep -q tinyllama; then
+        echo ' TinyLlama ya está instalado'
+      else
+        echo ' Descargando TinyLlama (637MB)...'
+        ollama pull tinyllama
+        echo ' TinyLlama descargado'
+      fi
+      
+      echo ' Inicialización de Ollama completada'
+      ollama list
+      "
+
+
+
+
+  traffic-generator:
+    build: ./traffic_generator
+    container_name: traffic-generator
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC=consultas-entrantes
+      - CSV_PATH=/app/datasets/train.csv
+      - SEND_INTERVAL=5  
+      - MAX_MESSAGES=0 
+    volumes:
+      - ./datasets:/app/datasets:ro
+    networks:
+      - distributed-network
+    restart: unless-stopped
+
+
+
+  # Storage System - Verifica caché en PostgreSQL
+  storage-system:
+    build: ./storage_system
+    container_name: storage-system
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      - POSTGRES_HOST=postgres-db
+      - POSTGRES_DB=yahoo_analysis
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC_INPUT=consultas-entrantes
+      - KAFKA_TOPIC_OUTPUT=consultas-procesadas
+      - KAFKA_CONSUMER_GROUP=storage-system-group
+    networks:
+      - distributed-network
+    restart: unless-stopped
+
+  
+  
+  # Flink Job Manager
+  flink-jobmanager:
+    image: flink:1.18-scala_2.12-java11
+    container_name: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    networks:
+      - distributed-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Flink Task Manager
+  flink-taskmanager:
+    image: flink:1.18-scala_2.12-java11
+    container_name: flink-taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    networks:
+      - distributed-network
+
+  # Flink Processor - Validador de Respuestas y Persistencia
+  flink-processor:
+    build: ./flink_processor
+    container_name: flink-processor
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres-db:
+        condition: service_healthy
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC_INPUT=respuestas-con-score
+      - KAFKA_TOPIC_REJECTED=consultas-procesadas
+      - SCORE_THRESHOLD=0.3
+      - MAX_RETRIES=3
+      - POSTGRES_HOST=postgres-db
+      - POSTGRES_DB=yahoo_analysis
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+    networks:
+      - distributed-network
+    restart: unless-stopped
+
+ 
+
+  # LLM Processor - TinyLlama
+  llm-processor:
+    build: ./llm_processor
+    container_name: llm-processor
+    depends_on:
+      ollama:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis-cache
+      - REDIS_PORT=6379
+      - OLLAMA_URL=http://ollama:11434
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC_INPUT=consultas-procesadas
+      - KAFKA_TOPIC_OUTPUT=respuestas-llm
+      - KAFKA_CONSUMER_GROUP=llm-processor-group
+    networks:
+      - distributed-network
+    restart: unless-stopped
+
+  # Score Calculator - Calcula scores y los envía a Flink
+  score-calculator:
+    build: ./score_calculator
+    container_name: score-calculator
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis-cache
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres-db
+      - POSTGRES_DB=yahoo_analysis
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC_INPUT=respuestas-llm
+      - KAFKA_TOPIC_OUTPUT=respuestas-con-score
+      - KAFKA_CONSUMER_GROUP=score-calculator-group
+    networks:
+      - distributed-network
+    restart: unless-stopped
+
+
+
+networks:
+  distributed-network:
+    driver: bridge
+    name: distributed-network
+
+volumes:
+  postgres_data:
+    name: postgres_data
+  ollama_data:
+    name: ollama_data

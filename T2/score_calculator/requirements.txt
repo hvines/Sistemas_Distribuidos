@@ -1,0 +1,6 @@
+redis
+psycopg2-binary
+scikit-learn
+numpy
+sentence-transformers
+kafka-python==2.0.2
